@@ -1,7 +1,7 @@
 <p align="center"><img src="Resources/AppIcon.png" width="128" alt="XCharge icon"></p>
 
 <h1 align="center">XCharge</h1>
-<p align="center">A free, open-source battery charge limiter for Apple Silicon MacBooks.<br>Charge limit, discharge, top up and calibration, all from the menu bar.</p>
+<p align="center">A free, source-available battery charge limiter for Apple Silicon MacBooks.<br>Charge limit, discharge, top up and calibration, all from the menu bar.</p>
 
 ---
 
@@ -53,4 +53,8 @@ This restores normal charging and removes everything.
 XCharge writes to your Mac's System Management Controller. It uses the same keys as other well-known charge limiters, but it comes with **no warranty**. Use at your own risk.
 
 ## License
-MIT. See [LICENSE](LICENSE).
+[PolyForm Noncommercial 1.0.0](LICENSE). XCharge is free, and must stay free.
+- ✅ Use it, modify it, and share it with anyone, at no cost
+- ❌ Don't sell it, and don't put it in a paid product or service
+
+We made this to help people stop paying for a battery limit.
