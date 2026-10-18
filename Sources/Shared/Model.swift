@@ -48,7 +48,7 @@ struct Command: Codable {
     var id = UUID()
 }
 
-struct Status: Codable {
+struct Status: Codable, Equatable {
     var updated = Date()
     var percent = 0
     var plugged = false

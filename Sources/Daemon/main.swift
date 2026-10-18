@@ -67,6 +67,8 @@ final class Daemon {
     var settingsStamp: Date?
     var lastCommandID: UUID?
     var message = ""
+    var notice = ""
+    var noticeUntil = Date.distantPast
     var assertion: IOPMAssertionID = 0
     var assertionType = ""
 
@@ -89,13 +91,20 @@ final class Daemon {
         guard let cmd = readJSON(Command.self, from: Paths.command), cmd.id != lastCommandID else { return }
         lastCommandID = cmd.id
         try? FileManager.default.removeItem(at: Paths.command)
+        let plugged = b.plugged || SMC.adapterOff
+        func tell(_ s: String) { notice = s; noticeUntil = Date().addingTimeInterval(6) }
         switch cmd.kind {
         case .discharge:
-            state.mode = state.mode == .discharge ? .normal : .discharge
+            if state.mode == .discharge { state.mode = .normal; break }
+            guard plugged else { tell("Unplugged — the battery is already discharging"); return }
+            guard b.percent > settings.limit else { tell("Already at or below \(settings.limit)%"); return }
+            state.mode = .discharge
         case .topUp:
-            state.mode = state.mode == .topUp ? .normal : .topUp
+            if state.mode == .topUp { state.mode = .normal; break }
+            guard plugged else { tell("Plug in the charger to top up"); return }
+            state.mode = .topUp
         case .calibrate:
-            guard b.plugged || SMC.adapterOff else { message = "Plug in the charger to calibrate"; return }
+            guard plugged else { tell("Plug in the charger to calibrate"); return }
             state.mode = .calibration
             state.calStep = .charge100a
             state.holdUntil = nil
@@ -115,8 +124,12 @@ final class Daemon {
 
         switch state.mode {
         case .topUp:
-            message = b.percent >= 100 ? "Topped up — holding at 100%" : "Topping up to 100%"
-            return (false, false)
+            if b.plugged {
+                message = b.percent >= 100 ? "Topped up — holding at 100%" : "Topping up to 100%"
+                return (false, false)
+            }
+            state.mode = .normal  // Top Up ends when the charger is removed
+            saveState()
 
         case .discharge:
             if b.percent > limit {
@@ -252,7 +265,7 @@ final class Daemon {
         s.calStep = state.mode == .calibration ? (state.calStep ?? .charge100a) : nil
         s.holdUntil = state.holdUntil
         s.lastCalibration = state.lastCalibration
-        s.message = message
+        s.message = Date() < noticeUntil ? notice : message
         writeJSON(s, to: Paths.status, mode: 0o644)
     }
 
@@ -316,6 +329,17 @@ for sig in [SIGTERM, SIGINT] {
     src.resume()
     signalSources.append(src)
 }
+
+let dirFD = open(Paths.sharedDir.path, O_EVTONLY)
+let dirWatch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: dirFD, eventMask: .write, queue: .main)
+dirWatch.setEventHandler {
+    // Our own status.json writes land here too; only react to the app's files.
+    let stamp = (try? FileManager.default.attributesOfItem(atPath: Paths.settings.path))?[.modificationDate] as? Date
+    if FileManager.default.fileExists(atPath: Paths.command.path) || stamp != daemon.settingsStamp {
+        daemon.tick()
+    }
+}
+dirWatch.resume()
 
 log("XCharge daemon started")
 daemon.tick()
