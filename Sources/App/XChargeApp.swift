@@ -26,8 +26,18 @@ final class Store: ObservableObject {
     @Published var launchAtLogin = LoginItem.isEnabled { didSet { LoginItem.set(launchAtLogin) } }
     private var timers: [Timer] = []
 
+    static let home = FileManager.default.homeDirectoryForCurrentUser
+    let settingsURL = Paths.settings(home: home)
+    let commandURL = Paths.command(home: home)
+
     init() {
-        settings = readJSON(Settings.self, from: Paths.settings) ?? Settings()
+        try? FileManager.default.createDirectory(at: Paths.userDir(home: Self.home), withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        // First run after the v1.3 move: start from what the helper is already enforcing.
+        settings = readJSON(Settings.self, from: Paths.settings(home: Self.home))
+            ?? readJSON(Settings.self, from: Paths.daemonSettings)
+            ?? Settings()
+        if !FileManager.default.fileExists(atPath: settingsURL.path) { writeJSON(settings, to: settingsURL) }
         refresh()
         refreshOptimizedCharging()
         timers = [
@@ -69,10 +79,10 @@ final class Store: ObservableObject {
         }
     }
 
-    func save() { writeJSON(settings, to: Paths.settings) }
+    func save() { writeJSON(settings, to: settingsURL) }
 
     func send(_ kind: CommandKind) {
-        writeJSON(Command(kind: kind), to: Paths.command)
+        writeJSON(Command(kind: kind), to: commandURL)
         // The daemon reacts within milliseconds; pick up its answer right away.
         for delay in [0.15, 0.5, 1.2] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refresh() }

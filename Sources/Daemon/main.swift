@@ -1,6 +1,7 @@
 import Foundation
 import IOKit
 import IOKit.pwr_mgt
+import SystemConfiguration
 
 // XCharge daemon — runs as root via launchd and is the only thing that touches the SMC.
 // Apple Silicon firmware on macOS 15+ exposes CHTE (charge inhibit) and CHIE (adapter off).
@@ -59,38 +60,53 @@ struct DaemonState: Codable {
     var calStep: CalStep?
     var holdUntil: Date?
     var lastCalibration: Date?
+    var lastCommandID: UUID?
 }
 
 final class Daemon {
-    var settings = Settings()
+    var settings = (readJSON(Settings.self, from: Paths.daemonSettings) ?? Settings()).sanitized()
     var state = readJSON(DaemonState.self, from: Paths.daemonState) ?? DaemonState()
-    var settingsStamp: Date?
-    var lastCommandID: UUID?
+    var user: (uid: uid_t, home: URL)?
+    var settingsPrint = ""
+    var inputPrint = ""
     var message = ""
     var notice = ""
     var noticeUntil = Date.distantPast
     var assertion: IOPMAssertionID = 0
     var assertionType = ""
 
+    /// Picks up the console user's settings; keeps the last good copy (root-owned) when nobody is logged in.
     func loadSettings() {
-        let stamp = (try? FileManager.default.attributesOfItem(atPath: Paths.settings.path))?[.modificationDate] as? Date
-        guard stamp != settingsStamp else { return }
-        settingsStamp = stamp
-        if let s = readJSON(Settings.self, from: Paths.settings) {
-            settings = s
-            settings.limit = min(100, max(20, s.limit))
+        guard let user else { return }
+        let url = Paths.settings(home: user.home)
+        let print = "\(user.uid)|" + fingerprint(url)
+        guard print != settingsPrint else { return }
+        settingsPrint = print
+        guard let s = readUserJSON(Settings.self, at: url, owner: user.uid)?.sanitized(), s != settings else { return }
+        settings = s
+        writeJSON(settings, to: Paths.daemonSettings)
+    }
+
+    func saveState() { writeJSON(state, to: Paths.daemonState) }
+
+    /// Called often; only does real work when the user's files changed.
+    func checkInputs() {
+        user = consoleUser()
+        guard let user else { return }
+        let print = "\(user.uid)|" + fingerprint(Paths.settings(home: user.home)) + "|" + fingerprint(Paths.command(home: user.home))
+        if print != inputPrint {
+            inputPrint = print
+            tick()
         }
     }
 
-    func saveState() {
-        try? FileManager.default.createDirectory(at: Paths.daemonState.deletingLastPathComponent(), withIntermediateDirectories: true)
-        writeJSON(state, to: Paths.daemonState, mode: 0o644)
-    }
-
     func handleCommand(_ b: Battery) {
-        guard let cmd = readJSON(Command.self, from: Paths.command), cmd.id != lastCommandID else { return }
-        lastCommandID = cmd.id
-        try? FileManager.default.removeItem(at: Paths.command)
+        guard let user,
+              let cmd = readUserJSON(Command.self, at: Paths.command(home: user.home), owner: user.uid),
+              cmd.id != state.lastCommandID,
+              abs(cmd.created.timeIntervalSinceNow) < 60 else { return }
+        state.lastCommandID = cmd.id  // never deleted (root doesn't touch user files); de-duplicated by id
+        saveState()
         let plugged = b.plugged || SMC.adapterOff
         func tell(_ s: String) { notice = s; noticeUntil = Date().addingTimeInterval(6) }
         switch cmd.kind {
@@ -235,6 +251,7 @@ final class Daemon {
     }
 
     func tick() {
+        user = consoleUser()
         loadSettings()
         guard let b = readBattery() else { return }
         handleCommand(b)
@@ -266,7 +283,7 @@ final class Daemon {
         s.holdUntil = state.holdUntil
         s.lastCalibration = state.lastCalibration
         s.message = Date() < noticeUntil ? notice : message
-        writeJSON(s, to: Paths.status, mode: 0o644)
+        writeJSON(s, to: Paths.status)
     }
 
     func willSleep() {
@@ -291,12 +308,10 @@ setvbuf(stdout, nil, _IOLBF, 0)
 guard getuid() == 0 else { log("must run as root"); exit(1) }
 guard smc_open() == 0 else { log("cannot open AppleSMC"); exit(1) }
 
-try? FileManager.default.createDirectory(at: Paths.sharedDir, withIntermediateDirectories: true,
-                                         attributes: [.posixPermissions: 0o777])
+umask(0o022)
+prepareRootDir()
+removeLegacySharedDir()
 let daemon = Daemon()
-if !FileManager.default.fileExists(atPath: Paths.settings.path) {
-    writeJSON(Settings(), to: Paths.settings)
-}
 
 // Sleep / wake notifications (kIOMessageCanSystemSleep / SystemWillSleep / SystemHasPoweredOn)
 var rootPort: io_connect_t = 0
@@ -330,19 +345,11 @@ for sig in [SIGTERM, SIGINT] {
     signalSources.append(src)
 }
 
-let dirFD = open(Paths.sharedDir.path, O_EVTONLY)
-let dirWatch = DispatchSource.makeFileSystemObjectSource(fileDescriptor: dirFD, eventMask: .write, queue: .main)
-dirWatch.setEventHandler {
-    // Our own status.json writes land here too; only react to the app's files.
-    let stamp = (try? FileManager.default.attributesOfItem(atPath: Paths.settings.path))?[.modificationDate] as? Date
-    if FileManager.default.fileExists(atPath: Paths.command.path) || stamp != daemon.settingsStamp {
-        daemon.tick()
-    }
-}
-dirWatch.resume()
-
 log("XCharge daemon started")
 daemon.tick()
+// Full tick every 2 s; a cheap stat() of the user's two files every 0.25 s for instant button response.
 let timer = Timer(timeInterval: 2, repeats: true) { _ in daemon.tick() }
+let inputTimer = Timer(timeInterval: 0.25, repeats: true) { _ in daemon.checkInputs() }
 RunLoop.main.add(timer, forMode: .default)
+RunLoop.main.add(inputTimer, forMode: .default)
 RunLoop.main.run()

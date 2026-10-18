@@ -1,13 +1,23 @@
 import Foundation
 
-// Shared between the menu bar app (user) and the daemon (root).
-// The app owns settings.json and drops command.json; the daemon owns status.json.
+// Shared between the menu bar app (runs as the user) and the daemon (runs as root).
+//
+// Security model: root never writes anywhere a normal user can write.
+// - App → daemon: settings.json / command.json in the logged-in user's own
+//   ~/Library/Application Support/XCharge. The daemon only *reads* them, only for the
+//   console user, refusing symlinks, non-regular files, foreign owners and oversized files.
+// - Daemon → app: status.json in root-owned /Library/Application Support/XCharge (0755),
+//   which the app can read but nobody else can write.
 enum Paths {
-    static let sharedDir = URL(fileURLWithPath: "/Users/Shared/XCharge")
-    static let settings = sharedDir.appendingPathComponent("settings.json")
-    static let command = sharedDir.appendingPathComponent("command.json")
-    static let status = sharedDir.appendingPathComponent("status.json")
-    static let daemonState = URL(fileURLWithPath: "/Library/Application Support/XCharge/state.json")
+    static let rootDir = URL(fileURLWithPath: "/Library/Application Support/XCharge")
+    static let status = rootDir.appendingPathComponent("status.json")
+    static let daemonState = rootDir.appendingPathComponent("state.json")
+    static let daemonSettings = rootDir.appendingPathComponent("settings.json")
+    static let legacySharedDir = "/Users/Shared/XCharge"  // v1.0–1.2, world-writable; removed on start
+
+    static func userDir(home: URL) -> URL { home.appendingPathComponent("Library/Application Support/XCharge") }
+    static func settings(home: URL) -> URL { userDir(home: home).appendingPathComponent("settings.json") }
+    static func command(home: URL) -> URL { userDir(home: home).appendingPathComponent("command.json") }
 }
 
 struct Settings: Codable, Equatable {
@@ -20,6 +30,16 @@ struct Settings: Codable, Equatable {
     var heatProtection = true
     var heatLimitC = 35.0
     var holdHours = 1.0             // calibration hold at 100%
+
+    /// Settings arrive from a user-writable file; never trust their ranges.
+    func sanitized() -> Settings {
+        var s = self
+        s.limit = min(100, max(20, s.limit))
+        s.sailing = min(20, max(1, s.sailing))
+        s.heatLimitC = s.heatLimitC.isFinite ? min(45, max(30, s.heatLimitC)) : 35
+        s.holdHours = s.holdHours.isFinite ? min(4, max(0.25, s.holdHours)) : 1
+        return s
+    }
 }
 
 enum Mode: String, Codable {
@@ -46,6 +66,7 @@ enum CommandKind: String, Codable {
 struct Command: Codable {
     var kind: CommandKind
     var id = UUID()
+    var created = Date()  // the daemon ignores stale commands (e.g. left over across a restart)
 }
 
 struct Status: Codable, Equatable {
@@ -88,7 +109,7 @@ func readJSON<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
     return try? JSONDecoder.xc.decode(type, from: data)
 }
 
-func writeJSON<T: Encodable>(_ value: T, to url: URL, mode: Int = 0o666) {
+func writeJSON<T: Encodable>(_ value: T, to url: URL, mode: Int = 0o644) {
     guard let data = try? JSONEncoder.xc.encode(value) else { return }
     try? data.write(to: url, options: .atomic)
     try? FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)

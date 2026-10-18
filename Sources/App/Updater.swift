@@ -1,7 +1,7 @@
 import Foundation
 
 // Updates come from the GitHub repo cloned on this Mac (path baked into Info.plist at build time).
-// Check = git fetch + count new commits. Update = run update.sh detached (it quits and relaunches us).
+// Check = git fetch + count commits up to the newest release tag. Update = run update.sh detached (it quits and relaunches us).
 @MainActor
 final class Updater: ObservableObject {
     enum State: Equatable { case idle, checking, upToDate, available(Int), updating, failed(String) }
@@ -27,8 +27,11 @@ final class Updater: ObservableObject {
         guard let repo, state != .updating else { return }
         state = .checking
         Task.detached {
-            let fetch = Self.git(["fetch", "--quiet"], in: repo)
-            let count = Self.git(["rev-list", "--count", "HEAD..@{u}"], in: repo)
+            // Only published releases (tags v*) count as updates, not every commit on main.
+            let fetch = Self.git(["fetch", "--tags", "--quiet", "origin"], in: repo)
+            let latest = Self.git(["tag", "-l", "v*", "--sort=-v:refname"], in: repo).out
+                .split(separator: "\n").first.map(String.init) ?? ""
+            let count = latest.isEmpty ? (code: Int32(0), out: "0") : Self.git(["rev-list", "--count", "HEAD..\(latest)"], in: repo)
             await MainActor.run {
                 if fetch.code != 0 {
                     self.state = .failed("Can't reach GitHub")
@@ -47,7 +50,7 @@ final class Updater: ObservableObject {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
         // Detached so it survives update.sh quitting this app.
-        p.arguments = ["-c", "nohup ./update.sh > /Users/Shared/XCharge/update.log 2>&1 &"]
+        p.arguments = ["-c", "nohup ./update.sh > ~/Library/Logs/XCharge-update.log 2>&1 &"]
         p.currentDirectoryURL = URL(fileURLWithPath: repo)
         p.environment = Self.env
         do { try p.run() } catch { state = .failed("Couldn't start update") }

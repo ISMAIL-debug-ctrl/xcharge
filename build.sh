@@ -6,7 +6,7 @@ rm -rf build && mkdir -p build/obj
 clang -c -O2 -mmacosx-version-min=14.0 Sources/Daemon/smc.c -o build/obj/smc.o
 swiftc -O -swift-version 5 -target arm64-apple-macos14 \
   -import-objc-header Sources/Daemon/smc.h \
-  Sources/Shared/Model.swift Sources/Daemon/main.swift build/obj/smc.o \
+  Sources/Shared/Model.swift Sources/Daemon/SafeFiles.swift Sources/Daemon/main.swift build/obj/smc.o \
   -framework IOKit -o build/com.ismailx.xcharge.daemon
 APP=build/XCharge.app/Contents
 mkdir -p $APP/MacOS $APP/Resources
@@ -20,6 +20,6 @@ PB=/usr/libexec/PlistBuddy
 $PB -c "Set :CFBundleShortVersionString $(cat VERSION)" $APP/Info.plist
 $PB -c "Set :CFBundleVersion $(git rev-list --count HEAD 2>/dev/null || echo 1)" $APP/Info.plist
 $PB -c "Add :XChargeRepoPath string $PWD" $APP/Info.plist
-codesign --force --sign - build/XCharge.app
-codesign --force --sign - --identifier com.ismailx.xcharge.daemon build/com.ismailx.xcharge.daemon
+codesign --force --options runtime --sign - build/XCharge.app
+codesign --force --options runtime --sign - --identifier com.ismailx.xcharge.daemon build/com.ismailx.xcharge.daemon
 echo "Built: build/XCharge.app + build/com.ismailx.xcharge.daemon"

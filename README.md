@@ -43,11 +43,22 @@ Click **Update now** in the panel when it appears, or run `./update.sh`. Your pa
 This restores normal charging and removes everything.
 
 ## How it works
-- **Menu bar app** (SwiftUI, runs as you): the panel and settings. It writes `settings.json` / `command.json` to `/Users/Shared/XCharge`.
-- **Helper** (`/Library/PrivilegedHelperTools/com.ismailx.xcharge.daemon`, runs as root via launchd): reads the battery from IOKit and writes two SMC keys:
+- **Menu bar app** (SwiftUI, runs as you): the panel and settings. It writes `settings.json` and `command.json` to your own `~/Library/Application Support/XCharge` (mode 700).
+- **Helper** (`/Library/PrivilegedHelperTools/com.ismailx.xcharge.daemon`, runs as root via launchd): reads the battery from IOKit and writes only two SMC keys:
   - `CHTE`: charge inhibit (charging stops, the Mac keeps running on the charger)
   - `CHIE`: adapter off (runs on battery while plugged in, used by Discharge)
 - When the helper stops, it restores normal charging.
+
+## Security
+The helper runs as root, so it is built to give nothing away:
+- **Root never writes where a normal user can write.** Its status and state live in root-owned `/Library/Application Support/XCharge` (0755). If that path is ever a symlink, or isn't owned by root, the helper moves it aside instead of writing through it.
+- **It only reads input from the logged-in user**, from that user's own folder. It refuses symlinks, FIFOs and devices, files owned by anyone else, and files over 64 KB. Every value is clamped to a safe range.
+- **Commands can't be replayed.** Each command has a unique ID and a timestamp; repeats and anything older than 60 s are ignored.
+- **The helper only touches two fixed SMC keys.** It never runs shell commands, never loads plugins, and has no network access. It is signed with the hardened runtime.
+- **Updates only install published releases** (`v*` tags on `main`), never every commit. The password prompt only appears when the helper itself changed. The installer copies the helper into root's private temp folder and checks its SHA-256 there, so nothing can swap it after you type your password.
+- v1.0–1.2 kept files in world-writable `/Users/Shared/XCharge`, which a local program could have abused. 1.3 removes that folder safely on first start. **Please update.**
+
+Found a security issue? Please open a GitHub issue or contact the maintainer privately before sharing details.
 
 ## Disclaimer
 XCharge writes to your Mac's System Management Controller. It uses the same keys as other well-known charge limiters, but it comes with **no warranty**. Use at your own risk.
