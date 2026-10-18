@@ -13,8 +13,9 @@ mkdir -p $APP/MacOS $APP/Resources
 clang -c -O2 -mmacosx-version-min=14.0 -fobjc-arc Sources/App/OBC.m -o build/obj/obc.o
 swiftc -O -swift-version 5 -target arm64-apple-macos14 -parse-as-library \
   -import-objc-header Sources/App/OBC.h \
-  Sources/Shared/Model.swift Sources/App/XChargeApp.swift build/obj/obc.o -o $APP/MacOS/XCharge
+  Sources/Shared/Model.swift Sources/App/XChargeApp.swift Sources/App/Updater.swift build/obj/obc.o -o $APP/MacOS/XCharge
 cp Resources/Info.plist $APP/Info.plist
+cp Resources/AppIcon.icns $APP/Resources/
 PB=/usr/libexec/PlistBuddy
 $PB -c "Set :CFBundleShortVersionString $(cat VERSION)" $APP/Info.plist
 $PB -c "Set :CFBundleVersion $(git rev-list --count HEAD 2>/dev/null || echo 1)" $APP/Info.plist
