@@ -51,6 +51,49 @@ enum SMC {
     }
 }
 
+/// Stops charging the way macOS itself does: a powerd "ChargeInhibit" assertion, so the system
+/// knows charging is paused on purpose and the menu bar shows the plug instead of the bolt.
+/// If macOS keeps charging anyway, falls back to the raw SMC key (CHTE) and remembers that.
+final class ChargeInhibitor {
+    private var assertion: IOPMAssertionID = 0
+    private var since: Date?
+    private(set) var usingSMC = false
+    var honored: Bool?  // nil = not known yet
+
+    var active: Bool { assertion != 0 || usingSMC }
+
+    func set(_ on: Bool, charging: Bool) {
+        guard on else {
+            if assertion != 0 { IOPMAssertionRelease(assertion); assertion = 0 }
+            since = nil
+            usingSMC = false
+            SMC.setInhibit(false)
+            return
+        }
+        if honored == false {
+            usingSMC = true
+        } else {
+            if assertion == 0 {
+                IOPMAssertionCreateWithName("ChargeInhibit" as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                            "XCharge charge limit" as CFString, &assertion)
+                since = Date()
+            }
+            if let since, Date().timeIntervalSince(since) > 8, honored == nil {
+                honored = !charging
+                log(honored! ? "macOS ChargeInhibit honored" : "macOS ChargeInhibit ignored — using CHTE")
+            }
+            usingSMC = honored == false
+        }
+        SMC.setInhibit(usingSMC)
+    }
+
+    /// Before sleep we can't wait to see if the assertion works, so hold both.
+    func holdForSleep() {
+        set(true, charging: false)
+        SMC.setInhibit(true)
+    }
+}
+
 func log(_ s: String) {
     FileHandle.standardError.write("[\(Date())] \(s)\n".data(using: .utf8)!)
 }
@@ -74,6 +117,7 @@ final class Daemon {
     var noticeUntil = Date.distantPast
     var assertion: IOPMAssertionID = 0
     var assertionType = ""
+    let inhibitor = ChargeInhibitor()
 
     /// Picks up the console user's settings; keeps the last good copy (root-owned) when nobody is logged in.
     func loadSettings() {
@@ -175,7 +219,7 @@ final class Daemon {
         } else if b.percent <= limit - settings.sailing {
             inhibit = false
         } else {
-            inhibit = SMC.inhibited  // sailing range: keep doing what we were doing
+            inhibit = inhibitor.active  // sailing range: keep doing what we were doing
         }
         // The gauge often reads 1–2% high after the Mac rests; don't flip to battery for that — stay on the plug.
         let drain = settings.autoDischarge && plugged && b.percent > limit + 2
@@ -257,7 +301,7 @@ final class Daemon {
         guard let b = readBattery() else { return }
         handleCommand(b)
         let (inhibit, adapterOff) = decide(b)
-        SMC.setInhibit(inhibit)
+        inhibitor.set(inhibit, charging: b.charging)
         SMC.setAdapterOff(adapterOff)
 
         // Stay awake while draining (adapter off counts as battery power) or charging toward the limit.
@@ -274,7 +318,7 @@ final class Daemon {
         s.plugged = b.plugged || adapterOff
         s.charging = b.charging
         s.adapterDisabled = SMC.adapterOff
-        s.chargeInhibited = SMC.inhibited
+        s.chargeInhibited = inhibitor.active
         s.temperatureC = b.tempC
         s.watts = b.watts
         s.cycles = b.cycles
@@ -292,13 +336,13 @@ final class Daemon {
         SMC.setAdapterOff(false)
         let charging100 = state.mode == .topUp || (state.mode == .calibration && state.calStep != .discharge10)
         if settings.enabled && settings.stopChargingOnSleep && !charging100 {
-            SMC.setInhibit(true)
+            inhibitor.holdForSleep()
         }
     }
 
     func restore() {
         SMC.setAdapterOff(false)
-        SMC.setInhibit(false)
+        inhibitor.set(false, charging: false)
         setAssertion(nil)
     }
 }
