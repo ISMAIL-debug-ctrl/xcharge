@@ -118,6 +118,22 @@ final class Daemon {
     var assertion: IOPMAssertionID = 0
     var assertionType = ""
     let inhibitor = ChargeInhibitor()
+    var appleLimit = -2              // last value read from macOS (-1 = unavailable)
+    var appleChecked = Date.distantPast
+    var appleHolds = false           // macOS itself is holding our limit
+
+    /// macOS accepts only 80/85/90/95/100. Use its native limit whenever ours is one of those;
+    /// otherwise keep macOS at 100 (off) and hold the charge ourselves.
+    func syncAppleLimit() {
+        let fits = settings.enabled && state.mode == .normal && settings.limit >= 80 && settings.limit % 5 == 0
+        let want = fits ? settings.limit : 100
+        if appleLimit != want || Date().timeIntervalSince(appleChecked) > 60 {
+            appleLimit = Int(mcl_get())
+            if appleLimit >= 0 && appleLimit != want { appleLimit = Int(mcl_set(Int32(want))) }
+            appleChecked = Date()
+        }
+        appleHolds = fits && want < 100 && appleLimit == want
+    }
 
     /// Picks up the console user's settings; keeps the last good copy (root-owned) when nobody is logged in.
     func loadSettings() {
@@ -211,6 +227,23 @@ final class Daemon {
             return (false, false)
         }
 
+        if appleHolds {
+            // macOS holds the limit itself; we only step in for heat or auto-discharge.
+            let drain = settings.autoDischarge && plugged && b.percent > limit + 2
+            if hot && b.charging {
+                message = String(format: "Too hot (%.0f°C) — paused", b.tempC)
+            } else if drain {
+                message = "Above limit — discharging to \(limit)%"
+            } else if !plugged {
+                message = "On battery"
+            } else if b.charging {
+                message = "Charging to \(limit)% (macOS limit)"
+            } else {
+                message = "Holding \(b.percent)% — running on the charger"
+            }
+            return (hot || drain, drain)
+        }
+
         var inhibit: Bool
         if limit >= 100 {
             inhibit = false
@@ -300,6 +333,7 @@ final class Daemon {
         loadSettings()
         guard let b = readBattery() else { return }
         handleCommand(b)
+        syncAppleLimit()
         let (inhibit, adapterOff) = decide(b)
         inhibitor.set(inhibit, charging: b.charging)
         SMC.setAdapterOff(adapterOff)
@@ -341,6 +375,7 @@ final class Daemon {
     }
 
     func restore() {
+        if appleLimit >= 0 && appleLimit != 100 { _ = mcl_set(100) }  // leave macOS as we found it
         SMC.setAdapterOff(false)
         inhibitor.set(false, charging: false)
         setAssertion(nil)

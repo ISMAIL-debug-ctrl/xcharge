@@ -293,7 +293,9 @@ struct PanelView: View {
         switch status.mode {
         case .topUp: return "Top Up is on: charging to 100% this once. It turns off when you unplug or tap it again."
         case .discharge: return "Discharging: the Mac runs on battery while plugged in, until \(store.settings.limit)%."
-        default: return plugged ? nil : "Charger not connected — Discharge and Top Up need it."
+        default:
+            if !plugged { return "Charger not connected — Discharge and Top Up need it." }
+            return nil
         }
     }
 
