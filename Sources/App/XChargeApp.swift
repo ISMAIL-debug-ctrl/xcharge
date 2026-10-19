@@ -1,4 +1,5 @@
 import SwiftUI
+import IOKit.pwr_mgt
 
 @main
 struct XChargeApp: App {
@@ -26,6 +27,27 @@ final class Store: ObservableObject {
     @Published private(set) var daemonAlive = false
     @Published private(set) var optimizedCharging = -1  // 1 on, 0 off, -1 unavailable
     @Published var launchAtLogin = LoginItem.isEnabled { didSet { LoginItem.set(launchAtLogin) } }
+    // App-only preference (kept out of the helper's settings so changing it never needs a password).
+    @Published var keepAwakeOnCharger = UserDefaults.standard.bool(forKey: "keepAwakeOnCharger") {
+        didSet {
+            UserDefaults.standard.set(keepAwakeOnCharger, forKey: "keepAwakeOnCharger")
+            updateKeepAwake()
+        }
+    }
+    private var awakeAssertion: IOPMAssertionID = 0
+
+    /// While plugged in: keep the display (and so the Mac) from idle-sleeping. Released on battery.
+    func updateKeepAwake() {
+        let want = keepAwakeOnCharger && status.plugged && daemonAlive
+        if want, awakeAssertion == 0 {
+            IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+                                        IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                        "XCharge: screen stays on while plugged in" as CFString, &awakeAssertion)
+        } else if !want, awakeAssertion != 0 {
+            IOPMAssertionRelease(awakeAssertion)
+            awakeAssertion = 0
+        }
+    }
     private var timers: [Timer] = []
 
     static let home = FileManager.default.homeDirectoryForCurrentUser
@@ -63,6 +85,7 @@ final class Store: ObservableObject {
         var same = s
         same.updated = status.updated
         if same != status { status = s }
+        updateKeepAwake()
     }
 
     // The PowerUI call is a synchronous XPC round trip; keep it off the main thread.
@@ -392,6 +415,8 @@ struct PanelView: View {
 
     var optionsCard: some View {
         Card {
+            Toggle("Keep screen on while plugged in", isOn: $store.keepAwakeOnCharger)
+                .help("The screen and the Mac never go to sleep on their own while the charger is connected. On battery, normal sleep applies.")
             Toggle("Open XCharge at login", isOn: $store.launchAtLogin)
                 .help("The battery helper always runs at startup; this only controls the menu bar app.")
             if store.optimizedCharging >= 0 {
