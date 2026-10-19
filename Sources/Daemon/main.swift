@@ -177,7 +177,8 @@ final class Daemon {
         } else {
             inhibit = SMC.inhibited  // sailing range: keep doing what we were doing
         }
-        let drain = settings.autoDischarge && plugged && b.percent > limit
+        // The gauge often reads 1–2% high after the Mac rests; don't flip to battery for that — stay on the plug.
+        let drain = settings.autoDischarge && plugged && b.percent > limit + 2
         if hot && !inhibit {
             inhibit = true
             message = String(format: "Too hot (%.0f°C) — paused", b.tempC)
@@ -186,7 +187,7 @@ final class Daemon {
         } else if !plugged {
             message = "On battery"
         } else if inhibit {
-            message = b.percent >= limit ? "Limit reached — holding \(b.percent)%" : "Sailing until \(limit - settings.sailing)%"
+            message = "Holding \(b.percent)% — running on the charger"
         } else {
             message = "Charging to \(limit)%"
         }

@@ -23,7 +23,7 @@ enum Paths {
 struct Settings: Codable, Equatable {
     var enabled = true
     var limit = 80                  // stop charging at this %
-    var sailing = 5                 // resume charging only once below limit - sailing
+    var sailing = 1                 // top up again once the charge drifts this far below the limit
     var autoDischarge = false       // if plugged in above the limit, drain down to it
     var stopChargingOnSleep = true  // the classic "limit ignored overnight" fix
     var stayAwakeUntilLimit = true  // keep the Mac awake while it charges up to the limit

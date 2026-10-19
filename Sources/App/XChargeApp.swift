@@ -10,7 +10,9 @@ struct XChargeApp: App {
             PanelView().environmentObject(store).environmentObject(updater)
         } label: {
             Image(nsImage: MenuBarIcon.make(percent: store.status.percent, limit: store.settings.limit,
-                                            charging: store.status.charging, alive: store.daemonAlive))
+                                            charging: store.status.charging,
+                                            onCharger: store.status.plugged && !store.status.charging && !store.status.adapterDisabled,
+                                            alive: store.daemonAlive))
             Text("\(store.status.percent)%")
         }
         .menuBarExtraStyle(.window)
@@ -113,7 +115,7 @@ enum LoginItem {
 
 // The app icon's battery, live: fill = charge, dashed orange line = limit, bolt while charging.
 enum MenuBarIcon {
-    static func make(percent: Int, limit: Int, charging: Bool, alive: Bool) -> NSImage {
+    static func make(percent: Int, limit: Int, charging: Bool, onCharger: Bool, alive: Bool) -> NSImage {
         let img = NSImage(size: NSSize(width: 14, height: 18), flipped: false) { _ in
             let body = NSRect(x: 3, y: 1, width: 8, height: 13.5)
             let outline = NSBezierPath(roundedRect: body, xRadius: 2.4, yRadius: 2.4)
@@ -151,6 +153,13 @@ enum MenuBarIcon {
                 }
                 b.close()
                 NSColor.white.setFill(); b.fill()
+            } else if onCharger {
+                // Plug: battery idle, the Mac runs from the charger (like Apple's own icon).
+                NSColor.white.setFill()
+                NSBezierPath(rect: NSRect(x: 5.4, y: 9.6, width: 0.9, height: 2.2)).fill()
+                NSBezierPath(rect: NSRect(x: 7.7, y: 9.6, width: 0.9, height: 2.2)).fill()
+                NSBezierPath(roundedRect: NSRect(x: 4.6, y: 6.6, width: 4.8, height: 3.2), xRadius: 1.2, yRadius: 1.2).fill()
+                NSBezierPath(rect: NSRect(x: 6.5, y: 3.6, width: 1.0, height: 3.2)).fill()
             }
             return true
         }
@@ -407,6 +416,7 @@ struct PanelView: View {
                     .disabled(!store.settings.heatProtection)
             }
             Stepper("Sailing range: \(store.settings.sailing)%", value: $store.settings.sailing, in: 1...20)
+                .help("How far the charge may drift below the limit before topping up again. 1% keeps it steady.")
         }
         .toggleStyle(.switch)
         .controlSize(.small)
