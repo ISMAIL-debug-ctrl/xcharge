@@ -51,47 +51,27 @@ enum SMC {
     }
 }
 
-/// Stops charging the way macOS itself does: a powerd "ChargeInhibit" assertion, so the system
-/// knows charging is paused on purpose and the menu bar shows the plug instead of the bolt.
-/// If macOS keeps charging anyway, falls back to the raw SMC key (CHTE) and remembers that.
+/// Stops charging two ways at once, so one failing never lets the battery charge past the limit:
+/// a powerd "ChargeInhibit" assertion (macOS knows charging is paused on purpose) and the CHTE SMC key.
+/// (macOS was seen to silently stop honoring the assertion after its own charge limit changed.)
 final class ChargeInhibitor {
     private var assertion: IOPMAssertionID = 0
-    private var since: Date?
-    private(set) var usingSMC = false
-    var honored: Bool?  // nil = not known yet
-
-    var active: Bool { assertion != 0 || usingSMC }
+    var active: Bool { assertion != 0 }
 
     func set(_ on: Bool, charging: Bool) {
-        guard on else {
-            if assertion != 0 { IOPMAssertionRelease(assertion); assertion = 0 }
-            since = nil
-            usingSMC = false
-            SMC.setInhibit(false)
-            return
-        }
-        if honored == false {
-            usingSMC = true
-        } else {
+        if on {
             if assertion == 0 {
                 IOPMAssertionCreateWithName("ChargeInhibit" as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
                                             "XCharge charge limit" as CFString, &assertion)
-                since = Date()
             }
-            if let since, Date().timeIntervalSince(since) > 8, honored == nil {
-                honored = !charging
-                log(honored! ? "macOS ChargeInhibit honored" : "macOS ChargeInhibit ignored — using CHTE")
-            }
-            usingSMC = honored == false
+        } else if assertion != 0 {
+            IOPMAssertionRelease(assertion)
+            assertion = 0
         }
-        SMC.setInhibit(usingSMC)
+        SMC.setInhibit(on)
     }
 
-    /// Before sleep we can't wait to see if the assertion works, so hold both.
-    func holdForSleep() {
-        set(true, charging: false)
-        SMC.setInhibit(true)
-    }
+    func holdForSleep() { set(true, charging: false) }
 }
 
 func log(_ s: String) {
@@ -118,23 +98,6 @@ final class Daemon {
     var assertion: IOPMAssertionID = 0
     var assertionType = ""
     let inhibitor = ChargeInhibitor()
-    var appleLimit = -2              // last value read from macOS (-1 = unavailable)
-    var appleChecked = Date.distantPast
-    var appleHolds = false           // macOS itself is holding our limit
-
-    /// macOS accepts only 80/85/90/95/100. Use its native limit whenever ours is one of those;
-    /// otherwise keep macOS at 100 (off) and hold the charge ourselves.
-    func syncAppleLimit() {
-        let fits = settings.enabled && state.mode == .normal && settings.limit >= 80 && settings.limit % 5 == 0
-        let want = fits ? settings.limit : 100
-        if appleLimit != want || Date().timeIntervalSince(appleChecked) > 60 {
-            appleLimit = Int(mcl_get())
-            if appleLimit >= 0 && appleLimit != want { appleLimit = Int(mcl_set(Int32(want))) }
-            appleChecked = Date()
-        }
-        appleHolds = fits && want < 100 && appleLimit == want
-    }
-
     /// Picks up the console user's settings; keeps the last good copy (root-owned) when nobody is logged in.
     func loadSettings() {
         guard let user else { return }
@@ -227,22 +190,6 @@ final class Daemon {
             return (false, false)
         }
 
-        if appleHolds {
-            // macOS holds the limit itself; we only step in for heat or auto-discharge.
-            let drain = settings.autoDischarge && plugged && b.percent > limit + 2
-            if hot && b.charging {
-                message = String(format: "Too hot (%.0f°C) — paused", b.tempC)
-            } else if drain {
-                message = "Above limit — discharging to \(limit)%"
-            } else if !plugged {
-                message = "On battery"
-            } else if b.charging {
-                message = "Charging to \(limit)% (macOS limit)"
-            } else {
-                message = "Holding \(b.percent)% — running on the charger"
-            }
-            return (hot || drain, drain)
-        }
 
         var inhibit: Bool
         if limit >= 100 {
@@ -333,7 +280,6 @@ final class Daemon {
         loadSettings()
         guard let b = readBattery() else { return }
         handleCommand(b)
-        syncAppleLimit()
         let (inhibit, adapterOff) = decide(b)
         inhibitor.set(inhibit, charging: b.charging)
         SMC.setAdapterOff(adapterOff)
@@ -375,7 +321,6 @@ final class Daemon {
     }
 
     func restore() {
-        if appleLimit >= 0 && appleLimit != 100 { _ = mcl_set(100) }  // leave macOS as we found it
         SMC.setAdapterOff(false)
         inhibitor.set(false, charging: false)
         setAssertion(nil)

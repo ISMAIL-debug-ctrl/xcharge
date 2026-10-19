@@ -4,12 +4,10 @@ set -e
 cd "$(dirname "$0")"
 rm -rf build && mkdir -p build/obj
 clang -c -O2 -mmacosx-version-min=14.0 Sources/Daemon/smc.c -o build/obj/smc.o
-clang -c -O2 -mmacosx-version-min=14.0 -fobjc-arc Sources/Daemon/AppleLimit.m -o build/obj/applelimit.o
-printf '#include "smc.h"\n#include "AppleLimit.h"\n' > build/obj/daemon-bridge.h
 swiftc -O -swift-version 5 -target arm64-apple-macos14 \
-  -import-objc-header build/obj/daemon-bridge.h -I Sources/Daemon \
-  Sources/Shared/Model.swift Sources/Daemon/SafeFiles.swift Sources/Daemon/main.swift build/obj/smc.o build/obj/applelimit.o \
-  -framework IOKit -framework Foundation -o build/com.ismailx.xcharge.daemon
+  -import-objc-header Sources/Daemon/smc.h \
+  Sources/Shared/Model.swift Sources/Daemon/SafeFiles.swift Sources/Daemon/main.swift build/obj/smc.o \
+  -framework IOKit -o build/com.ismailx.xcharge.daemon
 APP=build/XCharge.app/Contents
 mkdir -p $APP/MacOS $APP/Resources
 clang -c -O2 -mmacosx-version-min=14.0 -fobjc-arc Sources/App/OBC.m -o build/obj/obc.o
