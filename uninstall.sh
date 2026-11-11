@@ -4,6 +4,8 @@ launchctl bootout gui/$(id -u)/com.ismailx.xcharge.app 2>/dev/null
 rm -f ~/Library/LaunchAgents/com.ismailx.xcharge.app.plist
 pkill -x XCharge; rm -rf /Applications/XCharge.app ~/Library/Application\ Support/XCharge ~/Library/Logs/XCharge-update.log
 sudo launchctl bootout system/com.ismailx.xcharge.daemon 2>/dev/null   # the helper re-enables charging on exit
+# macOS 27+: hand the Charge Limit in System Settings back to 100% (off).
+osascript -l JavaScript -e 'ObjC.import("Foundation"); $.NSBundle.bundleWithPath("/System/Library/PrivateFrameworks/PowerUI.framework").load; var c = $.NSClassFromString("PowerUISmartChargeClient"); if (c) { c.alloc.initWithClientName("XCharge").setMCLLimitError(100, null); }' >/dev/null 2>&1
 sudo rm -f /Library/LaunchDaemons/com.ismailx.xcharge.daemon.plist /Library/PrivilegedHelperTools/com.ismailx.xcharge.daemon
 sudo rm -rf "/Library/Application Support/XCharge"
 [[ -d /Users/Shared/XCharge && ! -L /Users/Shared/XCharge ]] && sudo rm -rf /Users/Shared/XCharge   # pre-1.3 leftovers

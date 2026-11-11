@@ -85,6 +85,9 @@ struct Status: Codable, Equatable {
     var holdUntil: Date?
     var lastCalibration: Date?
     var message = ""
+    /// How the limit is held: "smc" (≤ macOS 26), "native" (macOS's own Charge Limit),
+    /// "inhibit" (powerd assertion) or "adapter" (charger cut at the limit, macOS 27 below 80%).
+    var backend: String?
 }
 
 extension JSONEncoder {

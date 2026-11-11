@@ -4,7 +4,8 @@ import IOKit.pwr_mgt
 import SystemConfiguration
 
 // XCharge daemon — runs as root via launchd and is the only thing that touches the SMC.
-// Apple Silicon firmware on macOS 15+ exposes CHTE (charge inhibit) and CHIE (adapter off).
+// macOS 15–26 firmware exposes CHTE (charge inhibit) and CHIE (adapter off).
+// macOS 27 removed CHTE; only CHIE is left, plus macOS's own Charge Limit (80–100%).
 
 struct Battery {
     var percent = 0, plugged = false, charging = false
@@ -23,15 +24,29 @@ func readBattery() -> Battery? {
     b.percent = Int(n("CurrentCapacity"))
     b.plugged = (d["ExternalConnected"] as? Bool) ?? false
     b.charging = (d["IsCharging"] as? Bool) ?? false
-    b.tempC = Double(n("Temperature")) / 100
     b.watts = Double(n("Voltage")) * Double(n("Amperage")) / 1_000_000
     b.cycles = Int(n("CycleCount"))
-    let design = n("DesignCapacity")
-    b.health = design > 0 ? Int(n("AppleRawMaxCapacity") * 100 / design) : 0
+    // macOS 27 moved capacity details into "BatteryData" and dropped "Temperature".
+    let data = d["BatteryData"] as? [String: Any] ?? [:]
+    func cap(_ k: String) -> Int64 { (d[k] as? NSNumber ?? data[k] as? NSNumber)?.int64Value ?? 0 }
+    let design = cap("DesignCapacity")
+    b.health = design > 0 ? Int(cap("AppleRawMaxCapacity") * 100 / design) : 0
+    b.tempC = d["Temperature"] != nil ? Double(n("Temperature")) / 100 : SMC.batteryTemperature
     return b
 }
 
 enum SMC {
+    /// CHTE exists up to macOS 26 firmware; macOS 27 removed it.
+    static let hasChargeInhibitKey: Bool = {
+        var b = [UInt8](repeating: 0, count: 4)
+        return smc_read("CHTE", &b, 4, nil) == 4
+    }()
+    static var batteryTemperature: Double {
+        var b = [UInt8](repeating: 0, count: 4)
+        guard smc_read("TB0T", &b, 4, nil) == 4 else { return 0 }
+        let v = Double(Float(bitPattern: UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24))
+        return v.isFinite && v > -40 && v < 120 ? v : 0
+    }
     static var inhibited: Bool {
         var b = [UInt8](repeating: 0, count: 4)
         return smc_read("CHTE", &b, 4, nil) == 4 && b.contains { $0 != 0 }
@@ -41,7 +56,7 @@ enum SMC {
         return smc_read("CHIE", &b, 1, nil) == 1 && b[0] != 0
     }
     static func setInhibit(_ on: Bool) {
-        guard on != inhibited else { return }
+        guard hasChargeInhibitKey, on != inhibited else { return }
         let bytes: [UInt8] = on ? [1, 0, 0, 0] : [0, 0, 0, 0]
         if smc_write("CHTE", bytes, 4) != 0 { log("CHTE write failed") }
     }
@@ -51,14 +66,26 @@ enum SMC {
     }
 }
 
-/// Stops charging two ways at once, so one failing never lets the battery charge past the limit:
-/// a powerd "ChargeInhibit" assertion (macOS knows charging is paused on purpose) and the CHTE SMC key.
-/// (macOS was seen to silently stop honoring the assertion after its own charge limit changed.)
+/// Stops charging at the limit with whatever the firmware still allows:
+/// - macOS ≤ 26: the CHTE SMC key and a powerd "ChargeInhibit" assertion, always both
+///   (macOS was seen to silently ignore the assertion alone).
+/// - macOS 27+: CHTE is gone. The caller lets macOS's own Charge Limit hold 80%+ natively;
+///   below 80 we hold the assertion, and if macOS ignores it we cut the adapter (CHIE) at the
+///   limit and reconnect it below — the only sub-80 route left on macOS 27.
 final class ChargeInhibitor {
     private var assertion: IOPMAssertionID = 0
-    var active: Bool { assertion != 0 }
+    private var wantSince: Date?
+    private var assertionIgnored = false   // sticky until restart once seen
+    private(set) var adapterCut = false
+    var active: Bool { assertion != 0 || adapterCut }
+    var backend: String {
+        if SMC.hasChargeInhibitKey { return "smc" }
+        return assertionIgnored ? "adapter" : "inhibit"
+    }
 
-    func set(_ on: Bool, charging: Bool) {
+    /// Returns true when the adapter must be cut to keep the battery from charging.
+    @discardableResult
+    func set(_ on: Bool, charging: Bool) -> Bool {
         if on {
             if assertion == 0 {
                 IOPMAssertionCreateWithName("ChargeInhibit" as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
@@ -68,7 +95,22 @@ final class ChargeInhibitor {
             IOPMAssertionRelease(assertion)
             assertion = 0
         }
-        SMC.setInhibit(on)
+        if SMC.hasChargeInhibitKey {
+            SMC.setInhibit(on)
+            return false
+        }
+        guard on else {
+            wantSince = nil
+            adapterCut = false
+            return false
+        }
+        if wantSince == nil { wantSince = Date() }
+        if !assertionIgnored, charging, let since = wantSince, Date().timeIntervalSince(since) > 15 {
+            assertionIgnored = true
+            log("macOS ignores ChargeInhibit — holding the limit by cutting the adapter")
+        }
+        adapterCut = assertionIgnored
+        return adapterCut
     }
 
     func holdForSleep() { set(true, charging: false) }
@@ -98,6 +140,23 @@ final class Daemon {
     var assertion: IOPMAssertionID = 0
     var assertionType = ""
     let inhibitor = ChargeInhibitor()
+    var nativeLimit = -2                 // macOS's own Charge Limit as last read (-1 = unavailable)
+    var nativeChecked = Date.distantPast
+
+    /// macOS 27+: keep macOS's own Charge Limit at our limit (80–100), or at 80 as a safety net
+    /// below that; 100 while topping up or calibrating. Untouched on older firmware.
+    func syncNativeLimit() -> Bool {
+        guard !SMC.hasChargeInhibitKey else { return false }
+        let free = !settings.enabled || state.mode == .topUp || state.mode == .calibration
+        let want = free ? 100 : max(80, settings.limit)
+        if nativeLimit != want || Date().timeIntervalSince(nativeChecked) > 60 {
+            nativeLimit = Int(native_limit_get())
+            if nativeLimit >= 0 && nativeLimit != want { nativeLimit = Int(native_limit_set(Int32(want))) }
+            nativeChecked = Date()
+        }
+        // macOS itself holds the limit (on the charger, survives sleep) when ours is 80% or more.
+        return !free && state.mode == .normal && settings.limit >= 80 && settings.limit < 100 && nativeLimit == settings.limit
+    }
     /// Picks up the console user's settings; keeps the last good copy (root-owned) when nobody is logged in.
     func loadSettings() {
         guard let user else { return }
@@ -280,12 +339,18 @@ final class Daemon {
         loadSettings()
         guard let b = readBattery() else { return }
         handleCommand(b)
-        let (inhibit, adapterOff) = decide(b)
-        inhibitor.set(inhibit, charging: b.charging)
+        let nativeHolds = syncNativeLimit()
+        var (inhibit, drain) = decide(b)
+        if nativeHolds {
+            // macOS stops at the limit by itself; we only step in for heat.
+            inhibit = settings.heatProtection && b.tempC >= settings.heatLimitC
+        }
+        let cut = inhibitor.set(inhibit, charging: b.charging)
+        let adapterOff = drain || cut
         SMC.setAdapterOff(adapterOff)
 
         // Stay awake while draining (adapter off counts as battery power) or charging toward the limit.
-        if adapterOff || state.mode == .calibration {
+        if drain || state.mode == .calibration {
             setAssertion(kIOPMAssertPreventUserIdleSystemSleep)
         } else if settings.enabled && settings.stayAwakeUntilLimit && b.plugged && !inhibit && state.mode == .normal {
             setAssertion(kIOPMAssertionTypePreventSystemSleep)
@@ -298,7 +363,8 @@ final class Daemon {
         s.plugged = b.plugged || adapterOff
         s.charging = b.charging
         s.adapterDisabled = SMC.adapterOff
-        s.chargeInhibited = inhibitor.active
+        s.chargeInhibited = inhibitor.active || (nativeHolds && b.plugged && !b.charging)
+        s.backend = nativeHolds ? "native" : inhibitor.backend
         s.temperatureC = b.tempC
         s.watts = b.watts
         s.cycles = b.cycles

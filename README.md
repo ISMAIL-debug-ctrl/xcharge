@@ -21,7 +21,7 @@ Keeping a lithium battery at 100% all day wears it out faster. XCharge stops cha
 - In-app updates from this repo
 
 ## Requirements
-- Apple Silicon Mac (M1/M2/M3/M4…) on macOS 14 or later. Built and tested on an M2 Pro with macOS 26.
+- Apple Silicon Mac (M1/M2/M3/M4…) on macOS 14 or later. Built and tested on an M2 Pro with macOS 26 and macOS 27.
 - Xcode Command Line Tools (`xcode-select --install`). XCharge is built on your Mac from source.
 - Quit AlDente or any other charge limiter first. Two apps writing the same SMC keys will fight; the installer offers to stop AlDente.
 
@@ -44,9 +44,10 @@ This restores normal charging and removes everything.
 
 ## How it works
 - **Menu bar app** (SwiftUI, runs as you): the panel and settings. It writes `settings.json` and `command.json` to your own `~/Library/Application Support/XCharge` (mode 700).
-- **Helper** (`/Library/PrivilegedHelperTools/com.ismailx.xcharge.daemon`, runs as root via launchd): reads the battery from IOKit and writes only two SMC keys:
-  - `CHTE`: charge inhibit (charging stops, the Mac keeps running on the charger)
-  - `CHIE`: adapter off (runs on battery while plugged in, used by Discharge)
+- **Helper** (`/Library/PrivilegedHelperTools/com.ismailx.xcharge.daemon`, runs as root via launchd) reads the battery from IOKit and holds the limit with whatever the firmware allows:
+  - **macOS 15–26:** the `CHTE` SMC key (charging stops, the Mac keeps running on the charger) plus a powerd `ChargeInhibit` assertion, always both.
+  - **macOS 27+:** Apple removed `CHTE`. Limits of **80% and up** use macOS's own Charge Limit (System Settings → Battery), so macOS holds the charge natively. **Below 80%**, macOS's limit stays at 80% as a safety net and XCharge asks macOS to pause charging. If macOS ignores that, XCharge cuts the charger (`CHIE`) at the limit and reconnects it just below, the only sub-80% route left on macOS 27.
+  - `CHIE` (adapter off) is also used by Discharge and Calibration.
 - When the helper stops, it restores normal charging.
 
 ## Security

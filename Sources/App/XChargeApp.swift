@@ -318,7 +318,14 @@ struct PanelView: View {
         case .discharge: return "Discharging: the Mac runs on battery while plugged in, until \(store.settings.limit)%."
         default:
             if !plugged { return "Charger not connected — Discharge and Top Up need it." }
-            return nil
+            switch status.backend {
+            case "adapter":
+                return "macOS 27 removed the switch apps used to pause charging. Below 80%, XCharge holds the limit by briefly running on battery (between \(store.settings.limit - store.settings.sailing)% and \(store.settings.limit)%). Set 80% or more to run purely from the charger."
+            case "native":
+                return "macOS itself is holding \(store.settings.limit)% — the Mac runs from the charger."
+            default:
+                return nil
+            }
         }
     }
 
