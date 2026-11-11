@@ -342,8 +342,12 @@ final class Daemon {
         let nativeHolds = syncNativeLimit()
         var (inhibit, drain) = decide(b)
         if nativeHolds {
-            // macOS stops at the limit by itself; we only step in for heat.
-            inhibit = settings.heatProtection && b.tempC >= settings.heatLimitC
+            // macOS stops at the limit by itself; we step in for heat, and as a guard if macOS
+            // ever charges past its own limit (it can override it, e.g. while it calibrates the battery).
+            let overshoot = b.charging && b.percent > settings.limit
+            if overshoot && !inhibitor.active { log("macOS charging past its \(settings.limit)% limit — XCharge stops it") }
+            inhibit = (settings.heatProtection && b.tempC >= settings.heatLimitC) || overshoot
+                || (inhibitor.active && b.percent > settings.limit)
         }
         let cut = inhibitor.set(inhibit, charging: b.charging)
         let adapterOff = drain || cut
